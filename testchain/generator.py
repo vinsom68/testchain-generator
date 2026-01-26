@@ -1,8 +1,9 @@
 from typing import List, Callable, Dict
+from binascii import hexlify
 
 from logging import Logger
 import bitcoin.rpc
-from bitcoin.core import CMutableTxIn, CMutableTxOut, CMutableTransaction, COutPoint, CTxInWitness, CTxWitness, b2lx
+from bitcoin.core import CMutableTxIn, CMutableTxOut, CMutableTransaction, COutPoint, CTxInWitness, CTxWitness, b2lx, lx
 from bitcoin.core.script import CScript, CScriptWitness, OP_CHECKSIG, SignatureHash, SIGHASH_ALL, SIGVERSION_WITNESS_V0
 from bitcoin.wallet import CBitcoinSecret
 
@@ -86,7 +87,7 @@ class Generator(object):
         key = CBitcoinSecret(COINBASE_KEY)
         coinbase_addr = Address(key)
 
-        unspents = self.proxy.listunspent(minconf=100, addrs=[coinbase_addr.address])
+        unspents = self.proxy.listunspent(minconf=1, addrs=[coinbase_addr.address])
         unspents.sort(key=lambda x: x['confirmations'], reverse=True)
         oldest_utxo = next(x for x in unspents if Coin.from_satoshi(x['amount']).bitcoin() >= value + self.fee)
 
@@ -117,7 +118,8 @@ class Generator(object):
         :return: the TXID of the transaction as returned by the proxy
         """
         tx = self._create_transaction(sources, recipients, values, n_locktime=n_locktime, n_sequence=n_sequence)
-        return self._send_transaction(tx, recipients)
+        # Allow zero-fee txs to avoid dust policy rejection for tiny outputs
+        return self._send_transaction(tx, recipients, allow_zero_fee=True)
 
     def _create_transaction(self, sources: List[Address], recipients: List[Address], values, n_locktime, n_sequence):
         if not values:
@@ -174,8 +176,12 @@ class Generator(object):
         tx.wit = CTxWitness(witnesses)
         return tx
 
-    def _send_transaction(self, tx: CMutableTransaction, recipients: List[Address]):
-        txid = self.proxy.sendrawtransaction(tx)
+    def _send_transaction(self, tx: CMutableTransaction, recipients: List[Address], allow_zero_fee=False):
+        if allow_zero_fee:
+            hextx = hexlify(tx.serialize()).decode()
+            txid = lx(self.proxy.call("sendrawtransaction", hextx, 0.0))
+        else:
+            txid = self.proxy.sendrawtransaction(tx)
         for rec in recipients:
             rec.txid = txid
         return b2lx(txid)

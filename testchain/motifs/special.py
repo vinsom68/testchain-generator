@@ -54,7 +54,7 @@ class SpecialCases(Generator):
         self.fund_address(source, 2 * self.fee)
 
         tx_ins = [CMutableTxIn(COutPoint(source.txid, source.vout))]
-        tx_outs = [CMutableTxOut(Coin(self.fee).satoshi(), CScript([OP_RETURN, x("4c6f726420566f6c64656d6f7274")]))]
+        tx_outs = [CMutableTxOut(0, CScript([OP_RETURN, x("4c6f726420566f6c64656d6f7274")]))]
         tx = CMutableTransaction(tx_ins, tx_outs)
 
         key = source.key

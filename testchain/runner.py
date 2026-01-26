@@ -12,7 +12,7 @@ import bitcoin
 import bitcoin.rpc
 from bitcoin.core.key import use_libsecp256k1_for_signing
 from testchain.generator import Generator
-from testchain.address import COINBASE_KEY
+from testchain.address import COINBASE_KEY, COINBASE_ADDRESS
 
 LOG_LEVEL = logging.INFO
 bitcoin.SelectParams('regtest')
@@ -34,7 +34,117 @@ class Runner(object):
         self._setup_logger()
         self._setup_bitcoind()
         self.proxy = bitcoin.rpc.Proxy(btc_conf_file=self._conf_file())
-        self.proxy.call("importprivkey", COINBASE_KEY)
+        self.wallet_proxy = None
+        self._import_coinbase_key()
+        # Mine after import so wallet owns the coinbase outputs
+        self.proxy.call("generatetoaddress", 101, COINBASE_ADDRESS)
+        self._ensure_spendable_funds()
+
+    def _ensure_spendable_funds(self):
+        """Mine enough blocks so coinbase outputs are spendable."""
+        try:
+            height = self.proxy.getblockcount()
+        except Exception:
+            height = 0
+        if height < 101:
+            blocks_needed = 101 - height
+            self.proxy.call("generatetoaddress", blocks_needed, COINBASE_ADDRESS)
+        # Verify wallet sees coinbase outputs
+        try:
+            unspents = self.proxy.listunspent(minconf=1, addrs=[COINBASE_ADDRESS])
+        except Exception:
+            unspents = []
+        if not unspents:
+            try:
+                info = self.proxy.call("getaddressinfo", COINBASE_ADDRESS)
+                self.log.info("Coinbase address info: ismine=%s, iswatchonly=%s",
+                              info.get("ismine"), info.get("iswatchonly"))
+            except Exception:
+                pass
+            try:
+                all_unspents = self.proxy.listunspent(minconf=1)
+                self.log.info("Wallet unspents (all): %d", len(all_unspents))
+            except Exception:
+                pass
+
+    def _import_coinbase_key(self):
+        """
+        Import the coinbase key into the wallet. Prefer legacy importprivkey,
+        but fall back to importdescriptors when importprivkey is unavailable.
+        """
+        try:
+            # Prefer legacy wallets when supported
+            self._ensure_wallet(descriptors=False)
+            (self.wallet_proxy or self.proxy).call("importprivkey", COINBASE_KEY)
+            return
+        except bitcoin.rpc.JSONRPCError as err:
+            msg = getattr(err, "error", {}).get("message", "")
+            if "Method not found" not in msg and "No wallet is loaded" not in msg \
+               and "descriptors argument must be set to \"true\"" not in msg:
+                raise
+
+        # Fall back to descriptor wallet + importdescriptors
+        self._ensure_wallet(descriptors=True)
+        desc = "pkh({})".format(COINBASE_KEY)
+        info = (self.wallet_proxy or self.proxy).call("getdescriptorinfo", desc)
+        desc_with_checksum = "{}#{}".format(desc, info["checksum"])
+        res = (self.wallet_proxy or self.proxy).call("importdescriptors", [{
+            "desc": desc_with_checksum,
+            "timestamp": 0,
+            "active": False,
+            "label": "coinbase"
+        }])
+        if not res or not res[0].get("success", False):
+            self.log.info("importdescriptors result: %s", res)
+            raise RuntimeError("importdescriptors failed")
+        try:
+            addr_info = (self.wallet_proxy or self.proxy).call("getaddressinfo", COINBASE_ADDRESS)
+            self.log.info("Post-import address info: ismine=%s, iswatchonly=%s",
+                          addr_info.get("ismine"), addr_info.get("iswatchonly"))
+        except Exception:
+            pass
+
+    def _ensure_wallet(self, descriptors):
+        try:
+            self.proxy.call("createwallet", "testchain", False, False, "", False, bool(descriptors))
+            self._use_wallet_proxy("testchain")
+        except bitcoin.rpc.JSONRPCError as err:
+            msg = getattr(err, "error", {}).get("message", "")
+            if "already exists" in msg or "exists" in msg:
+                self._use_wallet_proxy("testchain")
+                return
+            # If legacy wallets are disabled, allow fallback to descriptors
+            if not descriptors and ("descriptors=false" in msg or "descriptors argument must be set to \"true\"" in msg):
+                return
+            # If createwallet isn't supported, let caller decide
+            if "Method not found" in msg:
+                return
+            raise
+
+    def _use_wallet_proxy(self, wallet_name):
+        """Switch to wallet-scoped RPC endpoint for wallet methods."""
+        self.wallet_proxy = bitcoin.rpc.Proxy(service_url=self._wallet_url(wallet_name))
+        self.proxy = self.wallet_proxy
+
+    def _wallet_url(self, wallet_name):
+        # Read RPC settings from the generated bitcoin.conf
+        conf = {"rpcuser": "", "rpcpassword": ""}
+        try:
+            with open(self._conf_file(), "r") as fd:
+                for line in fd.readlines():
+                    if "#" in line:
+                        line = line[:line.index("#")]
+                    if "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    conf[k.strip()] = v.strip()
+        except FileNotFoundError:
+            pass
+        host = conf.get("rpcconnect", "localhost")
+        port = conf.get("rpcport", "18443")
+        user = conf.get("rpcuser", "")
+        password = conf.get("rpcpassword", "")
+        return "http://{}:{}@{}:{}/wallet/{}".format(user, password, host, port, wallet_name)
 
     def _setup_logger(self):
         self.log = logging.getLogger(__name__)
@@ -55,6 +165,8 @@ class Runner(object):
         # launch bitcoind
         params = [self.exec, "-rpcport=18443", "-datadir={}".format(self.tempdir.name),
                   "-mocktime={}".format(self.current_time)]
+        # Relax policy for regtest synthetic chain generation (dust/zero-fee)
+        params += ["-minrelaytxfee=0", "-dustrelayfee=0", "-acceptnonstdtxn=1"]
 
         # Disable Bitcoin Cash specific address format (breaks Python library)
         # Enable CTOR
