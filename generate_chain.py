@@ -1,4 +1,5 @@
 import argparse
+import os
 
 from testchain.motifs.general import SetupChain, FinalizeChain
 from testchain.motifs.change import Change
@@ -11,7 +12,8 @@ from testchain.motifs.cash import BitcoinCash
 from testchain.runner import Runner
 
 parser = argparse.ArgumentParser(description='Generate a synthetic blockchain.')
-parser.add_argument('--output-dir', dest='output_dir', default="../files/", help='Output directory')
+_default_output_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "files"))
+parser.add_argument('--output-dir', dest='output_dir', default=_default_output_dir, help='Output directory')
 parser.add_argument('--chain', dest='chain', default="btc", help='Chain [btc, bch]')
 parser.add_argument('--exec', dest='exec', default="bitcoind", help="Path to bitcoind executable")
 args = parser.parse_args()
