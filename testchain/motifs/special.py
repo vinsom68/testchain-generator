@@ -15,21 +15,43 @@ class SpecialCases(Generator):
         txid, _ = self.fund_address(self.next_address(), 10)
         tx2 = self.proxy.getrawtransaction(lx(txid))
 
-        coinbase = CMutableTransaction()
-        coinbase.vin.append(CMutableTxIn(COutPoint(), CScript([self.proxy.getblockcount() + 1])))
-        coinbase.vout.append(CMutableTxOut(reward * COIN, self.next_address().address.to_scriptPubKey()))
+        template = self.proxy.call("getblocktemplate", {"rules": ["segwit"]})
+        height = template["height"]
+        prev_block_hash = lx(template["previousblockhash"])
+        bits = int(template["bits"], 16)
+        version = int(template["version"])
 
-        prev_block_hash = self.proxy.getblockhash(self.proxy.getblockcount())
+        coinbase = CMutableTransaction()
+        # BIP34: encode the target block height in coinbase scriptSig.
+        coinbase.vin.append(CMutableTxIn(COutPoint(), CScript([height])))
+        coinbase.vout.append(CMutableTxOut(reward * COIN, self.next_address().address.to_scriptPubKey()))
 
         ts = self._next_timestamp()
         self.proxy.call("setmocktime", ts)
 
-        for nonce in range(1000):
-            block = CBlock(nBits=0x207fffff, vtx=[coinbase, tx2], hashPrevBlock=prev_block_hash, nTime=ts, nNonce=nonce)
+        accepted = False
+        last_reason = None
+        for nonce in range(100000):
+            txs = [coinbase, tx2]
+            merkle_root = CBlock.build_merkle_tree_from_txs(txs)[-1]
+            block = CBlock(
+                nVersion=version,
+                nBits=bits,
+                vtx=txs,
+                hashPrevBlock=prev_block_hash,
+                hashMerkleRoot=merkle_root,
+                nTime=ts,
+                nNonce=nonce,
+            )
             result = self.proxy.submitblock(block)
             if not result:
                 self.log.debug("Chosen nonce: {}".format(nonce))
+                accepted = True
                 break
+            last_reason = result
+
+        if not accepted:
+            raise RuntimeError("Failed to submit custom special-case block: {}".format(last_reason))
 
     def coinbase_does_not_claim_fees(self):
         reward = self.current_block_reward()
